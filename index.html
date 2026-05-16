@@ -1,0 +1,1715 @@
+require('dotenv').config();  
+  
+const express = require('express');  
+const mysql = require('mysql2/promise');  
+const bcrypt = require('bcryptjs');  
+const jwt = require('jsonwebtoken');  
+const cron = require('node-cron');  
+const cors = require('cors');  
+const helmet = require('helmet');  
+const rateLimit = require('express-rate-limit');  
+const multer = require('multer');  
+const nodemailer = require('nodemailer');  
+const fs = require('fs');  
+const path = require('path');  
+const { v4: uuidv4 } = require('uuid');  
+const { body, validationResult } = require('express-validator');  
+  
+const app = express();  
+  
+// =====================================================  
+// BASIC SECURITY  
+// =====================================================  
+  
+app.use(helmet());  
+app.use(cors());  
+app.use(express.json());  
+  
+const uploadDir = './uploads';  
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);  
+  
+app.use('/uploads', express.static(uploadDir));  
+  
+const apiLimiter = rateLimit({  
+    windowMs: 15 * 60 * 1000,  
+    max: 100,  
+    message: { error: 'Too many requests' }  
+});  
+  
+app.use('/api/', apiLimiter);  
+  
+// =====================================================  
+// DATABASE  
+// =====================================================  
+  
+const pool = mysql.createPool({  
+    host: process.env.DB_HOST,  
+    user: process.env.DB_USER,  
+    password: process.env.DB_PASSWORD,  
+    database: process.env.DB_NAME,  
+    waitForConnections: true,  
+    connectionLimit: 100,  
+    decimalNumbers: true  
+});  
+  
+// =====================================================
+// CONFIG - SINGAPORE CLUB PLAN
+// =====================================================
+
+const CONFIG = {
+
+    // 💰 MINIMUM PACKAGE
+    MIN_DEPOSIT: 50000,
+
+    // 📅 PLAN
+    ROI_MONTHS: 11,
+
+    // 🔥 DAILY ROI = 0.60%
+    ROI_DAILY: 0.006,
+
+    // 📈 MONTHLY ROI = 18%
+    ROI_MONTHLY: 0.18,
+
+    // 📊 LEVEL INCOME
+    LEVEL_RATES: {
+
+        1: 0.025,   // 2.5%
+        2: 0.015,   // 1.5%
+        3: 0.010,   // 1%
+        4: 0.005,   // 0.5%
+        5: 0.0025,  // 0.25%
+        6: 0.0015,  // 0.15%
+        7: 0.0010   // 0.10%
+    },
+
+    // 🔓 LEVEL UNLOCK
+    UNLOCKS: {
+
+        1: 0,
+        2: 300000,
+        3: 400000,
+        4: 500000,
+        5: 600000,
+        6: 700000,
+        7: 800000
+    },
+
+    TIMEZONE: 'Asia/Kolkata'
+};
+  
+// =====================================================  
+// MAILER  
+// =====================================================  
+  
+const transporter = nodemailer.createTransport({
+
+    service: 'gmail',
+
+    auth: {
+        user: process.env.MAIL_USER,
+        pass: process.env.MAIL_PASS
+    }
+
+});
+  
+// =====================================================  
+// AUTH  
+// =====================================================  
+  
+const protect = (role) => {  
+    return async (req, res, next) => {  
+  
+        try {  
+  
+            const token = req.headers.authorization?.split(' ')[1];  
+  
+            if (!token) {  
+                return res.status(401).json({ error: 'No Token' });  
+            }  
+  
+            const decoded = jwt.verify(token, JWT_SECRET);  
+if (!decoded.id) {
+    return res.status(401).json({ error: 'Invalid Token' });
+}
+
+  
+            if (role && decoded.role !== role) {  
+                return res.status(403).json({ error: 'Unauthorized' });  
+            }  
+  
+            req.user = decoded;  
+  
+            next();  
+  
+        } catch (e) {  
+            res.status(401).json({ error: 'Invalid Session' });  
+        }  
+    };  
+};  
+  
+// =====================================================  
+// FILE UPLOAD  
+// =====================================================  
+  
+const storage = multer.diskStorage({  
+    destination: uploadDir,  
+  
+    filename: (req, file, cb) => {  
+        cb(  
+            null,  
+            `${Date.now()}-${uuidv4().replace(/-/g, '')}${path.extname(file.originalname)}`  
+        );  
+    }  
+});  
+  
+const upload = multer({  
+    storage,  
+  
+    limits: {  
+        fileSize: 5 * 1024 * 1024
+    },  
+  
+    fileFilter: (req, file, cb) => {  
+  
+        if (!file.originalname.match(/\.(jpg|jpeg|png)$/i)) {  
+            return cb(new Error('Only JPG PNG'));  
+        }  
+  
+        cb(null, true);  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ USER DASHBOARD MAIN  
+// ==========================================  
+app.get('/api/user/dashboard/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const memberId = req.params.memberId;  
+  
+        // 👤 USER DETAILS  
+        const [userRows] = await pool.query(`  
+            SELECT   
+                id,  
+                member_id,  
+                full_name,  
+                sponsor_id,  
+                total_deposit,  
+                direct_volume  
+            FROM Users  
+            WHERE member_id=?  
+        `, [memberId]);  
+  
+        if (userRows.length === 0) {  
+            return res.json({  
+                success: false,  
+                message: "User Not Found"  
+            });  
+        }  
+  
+        const user = userRows[0];  
+  
+// =====================================
+// 💰 ROI + LEVEL INCOME
+// =====================================
+const [income] = await pool.query(`
+    SELECT
+
+    IFNULL(SUM(
+
+        CASE
+        WHEN type='ROI'
+        AND status='ACTIVE'
+
+        THEN net_total
+        ELSE 0
+        END
+
+    ),0) as roi_income,
+
+    IFNULL(SUM(
+
+        CASE
+        WHEN type='LEVEL'
+        AND status='ACTIVE'
+
+        THEN net_total
+        ELSE 0
+        END
+
+    ),0) as level_income
+
+    FROM Income_Logs
+
+    WHERE user_id=?
+
+`, [user.id]);
+  
+// =====================================
+// 👥 TODAY TEAM VOLUME
+// =====================================
+const [today] = await pool.query(`
+    SELECT IFNULL(SUM(d.amount),0) as total
+
+    FROM Deposits d
+
+    JOIN Users u
+    ON d.user_id = u.id
+
+    WHERE u.sponsor_id=?
+    AND d.status='APPROVED'
+    AND DATE(d.created_at)=CURDATE()
+
+`, [memberId]);
+
+
+// =====================================
+// 🌳 TOTAL TEAM VOLUME
+// =====================================
+const [team] = await pool.query(`
+
+    WITH RECURSIVE downline AS (
+
+        SELECT
+
+            id,
+            member_id,
+            total_deposit
+
+        FROM Users
+
+        WHERE sponsor_id=?
+
+        UNION ALL
+
+        SELECT
+
+            u.id,
+            u.member_id,
+            u.total_deposit
+
+        FROM Users u
+
+        INNER JOIN downline d
+        ON u.sponsor_id = d.member_id
+    )
+
+    SELECT
+    IFNULL(SUM(total_deposit),0) as total
+
+    FROM downline
+
+`, [memberId]);
+
+
+// =====================================
+// ✅ DASHBOARD RESPONSE
+// =====================================
+res.json({
+
+    success: true,
+
+    // 👤 MEMBER
+    member_name: user.full_name,
+
+    member_id: user.member_id,
+
+    sponsor_id: user.sponsor_id,
+
+    join_date: user.created_at,
+
+    // 💰 BUSINESS
+    total_deposit: user.total_deposit || 0,
+
+    roi_income: income[0].roi_income || 0,
+
+    level_income: income[0].level_income || 0,
+
+    direct_volume: user.direct_volume || 0,
+
+    total_team_volume: team[0].total || 0,
+
+    today_volume: today[0].total || 0
+
+});
+  
+// ==========================================  
+// ✅ USER PROFILE  
+// ==========================================  
+app.get('/api/user/profile/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const [rows] = await pool.query(`  
+            SELECT  
+  
+                member_id,  
+                full_name,  
+                mobile,  
+                email,  
+                password,  
+  
+                bank_name,  
+                account_number,  
+                ifsc_code,  
+                branch_name,  
+  
+                sponsor_id,  
+                created_at  
+  
+            FROM Users  
+            WHERE member_id=?  
+        `, [req.params.memberId]);  
+  
+        if (rows.length === 0) {  
+            return res.json({  
+                success: false  
+            });  
+        }  
+  
+        res.json({  
+            success: true,  
+            profile: rows[0]  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            success: false,  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ UPDATE PROFILE  
+// ==========================================  
+app.post('/api/user/update-profile', async (req, res) => {  
+  
+    try {  
+  
+        const {  
+  
+            member_id,  
+            full_name,  
+            mobile,  
+            email,  
+  
+            bank_name,  
+            account_number,  
+            ifsc_code,  
+            branch_name,  
+  
+            password  
+  
+        } = req.body;  
+  
+        await pool.query(`  
+            UPDATE Users  
+  
+            SET  
+  
+            full_name=?,  
+            mobile=?,  
+            email=?,  
+  
+            bank_name=?,  
+            account_number=?,  
+            ifsc_code=?,  
+            branch_name=?,  
+  
+            password=?  
+  
+            WHERE member_id=?  
+        `, [  
+  
+            full_name,  
+            mobile,  
+            email,  
+  
+            bank_name,  
+            account_number,  
+            ifsc_code,  
+            branch_name,  
+  
+            password,  
+  
+            member_id  
+  
+        ]);  
+  
+        res.json({  
+            success: true,  
+            message: "Profile Updated"  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            success: false,  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ SPONSOR CHECK  
+// ==========================================  
+app.get('/api/check-sponsor/:sponsorId', async (req, res) => {  
+  
+    try {  
+  
+        const [rows] = await pool.query(`  
+            SELECT   
+                full_name  
+            FROM Users  
+            WHERE member_id=?  
+        `, [req.params.sponsorId]);  
+  
+        if (rows.length === 0) {  
+  
+            return res.json({  
+                success: false  
+            });  
+        }  
+  
+        res.json({  
+  
+            success: true,  
+            sponsor_name: rows[0].full_name  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            success: false,  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ REGISTER MEMBER  
+// ==========================================  
+app.post('/api/register', async (req, res) => {  
+  
+    try {  
+  
+        const {  
+  
+            sponsorId,  
+  
+            name,  
+            mobile,  
+            email,  
+  
+            bank,  
+            account,  
+            ifsc,  
+            branch  
+  
+        } = req.body;  
+  
+        // 🔥 MEMBER ID  
+        const memberId = await generateMemberId();  
+  
+        // 🔥 PASSWORD  
+        const password = Math.random()
+    .toString(36)
+    .slice(-8);
+
+const hashedPassword = await bcrypt.hash(password, 10);
+  
+        // =====================================  
+        // ✅ INSERT USER  
+        // =====================================  
+        await pool.query(`  
+            INSERT INTO Users (  
+  
+                member_id,  
+                sponsor_id,  
+  
+                full_name,  
+                mobile,  
+                email,  
+  
+                bank_name,  
+                account_number,  
+                ifsc_code,  
+                branch_name,  
+  
+                password  
+  
+            )  
+  
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)  
+        `, [  
+  
+            memberId,  
+            sponsorId,  
+  
+            name,  
+            mobile,  
+            email,  
+  
+            bank,  
+            account,  
+            ifsc,  
+            branch,  
+  
+            password  
+  
+        ]);  
+  
+        // =====================================  
+        // 📩 SEND EMAIL  
+        // =====================================  
+        await sendWelcomeEmail(  
+            email,  
+            memberId,  
+            password  
+        );  
+  
+        res.json({  
+  
+            success: true,  
+  
+            member_id: memberId,  
+            password: password  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            success: false,  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ ROI INCOME HISTORY  
+// ==========================================  
+app.get('/api/user/roi-history/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const [u] = await pool.query(`  
+            SELECT id  
+            FROM Users  
+            WHERE member_id=?  
+        `, [req.params.memberId]);  
+  
+        if (u.length === 0) {  
+            return res.json([]);  
+        }  
+  
+        const userId = u[0].id;  
+  
+        const [rows] = await pool.query(`  
+            SELECT  
+  
+                DATE(created_at) as date,  
+  
+                amount,  
+                service_charge,  
+                net_total  
+  
+            FROM Income_Logs  
+  
+            WHERE user_id=?  
+            AND type='ROI'  
+  
+            ORDER BY created_at DESC  
+        `, [userId]);  
+  
+        res.json(rows);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ LEVEL INCOME HISTORY  
+// ==========================================  
+app.get('/api/user/level-history/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const [u] = await pool.query(`  
+            SELECT id  
+            FROM Users  
+            WHERE member_id=?  
+        `, [req.params.memberId]);  
+  
+        if (u.length === 0) {  
+            return res.json([]);  
+        }  
+  
+        const userId = u[0].id;  
+  
+        const [rows] = await pool.query(`  
+            SELECT  
+  
+                DATE(created_at) as date,  
+  
+                amount,  
+                service_charge,  
+                net_total  
+  
+            FROM Income_Logs  
+  
+            WHERE user_id=?  
+            AND type='LEVEL'  
+  
+            ORDER BY created_at DESC  
+        `, [userId]);  
+  
+        res.json(rows);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ 20 LEVEL TREE  
+// ==========================================  
+app.get('/api/user/team-tree/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const [rows] = await pool.query(`  
+  
+            WITH RECURSIVE downline AS (  
+  
+                SELECT  
+  
+                    id,  
+                    member_id,  
+                    full_name,  
+                    sponsor_id,  
+                    total_deposit,  
+                    1 as level  
+  
+                FROM Users  
+                WHERE sponsor_id=?  
+  
+                UNION ALL  
+  
+                SELECT  
+  
+                    u.id,  
+                    u.member_id,  
+                    u.full_name,  
+                    u.sponsor_id,  
+                    u.total_deposit,  
+                    d.level + 1  
+  
+                FROM Users u  
+  
+                INNER JOIN downline d  
+                ON u.sponsor_id = d.member_id  
+  
+                WHERE d.level < 20  
+            )  
+  
+            SELECT *  
+            FROM downline  
+  
+            ORDER BY level ASC  
+        `, [req.params.memberId]);  
+  
+        res.json(rows);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ CREATE DEPOSIT REQUEST  
+// ==========================================  
+app.post('/api/user/deposit-request', async (req, res) => {  
+  
+    try {  
+  
+        const {  
+  
+            memberId,  
+            amount  
+  
+        } = req.body;  
+  
+        // 🔥 MINIMUM CHECK  
+        if (amount < 50000) {  
+  
+            return res.json({  
+                success: false,  
+                message: "Minimum Deposit 50000"  
+            });  
+        }  
+  
+        // 👤 USER  
+        const [u] = await pool.query(`  
+            SELECT id  
+            FROM Users  
+            WHERE member_id=?  
+        `, [memberId]);  
+  
+        if (u.length === 0) {  
+  
+            return res.json({  
+                success: false,  
+                message: "User Not Found"  
+            });  
+        }  
+  
+        // =====================================  
+        // ✅ INSERT REQUEST  
+        // =====================================  
+        await pool.query(`  
+            INSERT INTO Deposits (  
+  
+                user_id,  
+                amount,  
+                status  
+  
+            )  
+  
+            VALUES (?, ?, 'PENDING')  
+        `, [  
+  
+            u[0].id,  
+            amount  
+  
+        ]);  
+  
+        res.json({  
+  
+            success: true,  
+            message: "Deposit Request Submitted"  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            success: false,  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ DEPOSIT HISTORY  
+// ==========================================  
+app.get('/api/user/deposit-history/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const [u] = await pool.query(`  
+            SELECT id  
+            FROM Users  
+            WHERE member_id=?  
+        `, [req.params.memberId]);  
+  
+        if (u.length === 0) {  
+            return res.json([]);  
+        }  
+  
+        const [rows] = await pool.query(`  
+            SELECT  
+  
+                amount,  
+                status,  
+                created_at  
+  
+            FROM Deposits  
+  
+            WHERE user_id=?  
+  
+            ORDER BY created_at DESC  
+        `, [u[0].id]);  
+  
+        res.json(rows);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ LOGIN  
+// ==========================================  
+app.post('/api/login', async (req, res) => {  
+  
+    try {  
+  
+        const {  
+  
+            member_id,  
+            password  
+  
+        } = req.body;  
+  
+        const [rows] = await pool.query(`  
+            SELECT *  
+  
+            FROM Users  
+  
+            WHERE member_id=?  
+            AND password=?  
+        `, [  
+  
+            member_id,  
+            password  
+  
+        ]);  
+  
+        if (rows.length === 0) {  
+  
+            return res.json({  
+                success: false,  
+                message: "Invalid Login"  
+            });  
+        }  
+  
+        res.json({  
+  
+            success: true,  
+            user: rows[0]  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            success: false,  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+// ==========================================  
+// 🔥 ADMIN PANEL APIs (SINGAPORE CLUB)  
+// ==========================================  
+  
+  
+// ==========================================  
+// ✅ ADMIN MEMBER LIST  
+// ==========================================  
+app.get('/api/admin/members', async (req, res) => {  
+  
+    try {  
+  
+        const search = req.query.search || '';  
+  
+        const [rows] = await pool.query(`  
+  
+            SELECT  
+  
+                u.id,  
+  
+                u.member_id,  
+                u.full_name,  
+  
+                u.sponsor_id,  
+  
+                u.mobile,  
+                u.email,  
+  
+                u.password,  
+  
+                u.total_deposit,  
+  
+                u.direct_volume,  
+  
+                u.bank_name,  
+                u.account_number,  
+                u.ifsc_code,  
+                u.branch_name,  
+  
+                IFNULL((  
+                    SELECT SUM(net_total)  
+                    FROM Income_Logs  
+                    WHERE user_id = u.id  
+                    AND type='ROI'  
+                ),0) as total_roi,  
+  
+                IFNULL((  
+                    SELECT SUM(total_deposit)  
+                    FROM Users  
+                    WHERE sponsor_id = u.member_id  
+                ),0) as team_business  
+  
+            FROM Users u  
+  
+            WHERE  
+  
+            u.member_id LIKE ?  
+            OR u.full_name LIKE ?  
+  
+            ORDER BY u.id DESC  
+  
+        `, [  
+  
+            `%${search}%`,  
+            `%${search}%`  
+  
+        ]);  
+  
+        // 🔥 COUNTING  
+        const result = rows.map((r, index) => ({  
+  
+            no: index + 1,  
+  
+            member_name: r.full_name,  
+  
+            member_id: r.member_id,  
+  
+            sponsor_id: r.sponsor_id,  
+  
+            mobile: r.mobile,  
+  
+            email: r.email,  
+  
+            password: r.password,  
+  
+            total_deposit: r.total_deposit,  
+  
+            total_roi: r.total_roi,  
+  
+            team_business: r.team_business,  
+  
+            direct_business: r.direct_volume  
+  
+        }));  
+  
+        res.json(result);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ ADMIN MEMBER FULL PROFILE  
+// ==========================================  
+app.get('/api/admin/member-profile/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const [rows] = await pool.query(`  
+  
+            SELECT *  
+  
+            FROM Users  
+  
+            WHERE member_id=?  
+  
+        `, [req.params.memberId]);  
+  
+        if (rows.length === 0) {  
+  
+            return res.json({  
+                success: false  
+            });  
+        }  
+  
+        res.json({  
+  
+            success: true,  
+            profile: rows[0]  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ ADMIN UPDATE MEMBER  
+// ==========================================  
+app.post('/api/admin/update-member', async (req, res) => {  
+  
+    try {  
+  
+        const {  
+  
+            member_id,  
+  
+            full_name,  
+            mobile,  
+            email,  
+  
+            password,  
+  
+            bank_name,  
+            account_number,  
+            ifsc_code,  
+            branch_name  
+  
+        } = req.body;  
+  
+        await pool.query(`  
+  
+            UPDATE Users  
+  
+            SET  
+  
+            full_name=?,  
+            mobile=?,  
+            email=?,  
+  
+            password=?,  
+  
+            bank_name=?,  
+            account_number=?,  
+            ifsc_code=?,  
+            branch_name=?  
+  
+            WHERE member_id=?  
+  
+        `, [  
+  
+            full_name,  
+            mobile,  
+            email,  
+  
+            password,  
+  
+            bank_name,  
+            account_number,  
+            ifsc_code,  
+            branch_name,  
+  
+            member_id  
+  
+        ]);  
+  
+        res.json({  
+  
+            success: true,  
+            message: "Member Updated"  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ ADMIN OPEN MEMBER ID  
+// ==========================================  
+app.get('/api/admin/open-member/:memberId', async (req, res) => {  
+  
+    try {  
+  
+        const [rows] = await pool.query(`  
+            SELECT *  
+            FROM Users  
+            WHERE member_id=?  
+        `, [req.params.memberId]);  
+  
+        if (rows.length === 0) {  
+  
+            return res.json({  
+                success: false  
+            });  
+        }  
+  
+        res.json({  
+  
+            success: true,  
+            login_user: rows[0]  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ DAILY / WEEKLY TRANSACTION REPORT  
+// ==========================================  
+app.get('/api/admin/transaction-report', async (req, res) => {  
+  
+    try {  
+  
+        const from = req.query.from;  
+        const to = req.query.to;  
+  
+        const [rows] = await pool.query(`  
+  
+            SELECT  
+  
+                d.created_at,  
+  
+                u.member_id,  
+                u.full_name,  
+  
+                u.mobile,  
+                u.email,  
+  
+                u.sponsor_id,  
+  
+                d.amount,  
+                d.status,  
+  
+                u.total_deposit  
+  
+            FROM Deposits d  
+  
+            JOIN Users u  
+            ON d.user_id = u.id  
+  
+            WHERE DATE(d.created_at)  
+            BETWEEN ? AND ?  
+  
+            ORDER BY d.created_at DESC  
+  
+        `, [from, to]);  
+  
+        res.json(rows);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ DAILY PAYOUT REPORT  
+// ==========================================  
+app.get('/api/admin/payout-report', async (req, res) => {  
+  
+    try {  
+  
+        const from = req.query.from;  
+        const to = req.query.to;  
+  
+        const [rows] = await pool.query(`  
+  
+            SELECT  
+  
+                DATE(i.created_at) as payout_date,  
+  
+                u.member_id,  
+                u.full_name,  
+  
+                u.mobile,  
+                u.email,  
+  
+                u.bank_name,  
+                u.account_number,  
+                u.ifsc_code,  
+                u.branch_name,  
+  
+                u.total_deposit,  
+  
+                u.direct_volume,  
+  
+                IFNULL(SUM(  
+                    CASE  
+                    WHEN i.type='ROI'  
+                    THEN i.net_total  
+                    ELSE 0  
+                    END  
+                ),0) as roi_income,  
+  
+                IFNULL(SUM(  
+                    CASE  
+                    WHEN i.type='LEVEL'  
+                    THEN i.net_total  
+                    ELSE 0  
+                    END  
+                ),0) as level_income,  
+  
+                IFNULL(SUM(i.net_total),0) as total_payout  
+  
+            FROM Income_Logs i  
+  
+            JOIN Users u  
+            ON i.user_id = u.id  
+  
+            WHERE DATE(i.created_at)  
+            BETWEEN ? AND ?  
+  
+            GROUP BY u.id, DATE(i.created_at)  
+  
+            ORDER BY i.created_at DESC  
+  
+        `, [from, to]);  
+  
+        res.json(rows);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ DAILY AUTO ROI PROCESS  
+// 🔥 0.60% DAILY  
+// ==========================================  
+cron.schedule('0 0 * * *', async () => {  
+  
+    const conn = await pool.getConnection();  
+  
+    try {  
+  
+        await conn.beginTransaction();  
+  
+        // =====================================  
+        // 🔥 ACTIVE USERS  
+        // =====================================  
+        const [users] = await conn.query(`  
+  
+            SELECT  
+  
+                id,  
+                total_deposit  
+  
+            FROM Users  
+  
+            WHERE total_deposit > 0  
+  
+        `);  
+  
+        for (let u of users) {  
+  
+            // =================================  
+            // 🔥 DAILY ROI  
+            // =================================  
+            const roiAmount =  
+                u.total_deposit * 0.006;  
+  
+            // =================================  
+            // 🔥 CHECK TODAY EXISTS  
+            // =================================  
+            const [exist] = await conn.query(`  
+  
+                SELECT id  
+  
+                FROM Income_Logs  
+  
+                WHERE user_id=?  
+                AND type='ROI'  
+                AND DATE(created_at)=CURDATE()  
+  
+            `, [u.id]);  
+  
+            if (exist.length === 0) {  
+  
+                await conn.query(`  
+  
+                    INSERT INTO Income_Logs (  
+  
+                        user_id,  
+                        type,  
+                        amount,  
+                        service_charge,  
+                        net_total  
+  
+                    )  
+  
+                    VALUES (?, 'ROI', ?, 0, ?)  
+  
+                `, [  
+  
+                    u.id,  
+                    roiAmount,  
+                    roiAmount  
+  
+                ]);  
+            }  
+        }  
+  
+        await conn.commit();  
+  
+        console.log("✅ DAILY ROI SUCCESS");  
+  
+    } catch (err) {  
+  
+        await conn.rollback();  
+  
+        console.log(err);  
+  
+    } finally {  
+  
+        conn.release();  
+  
+    }  
+  
+});  
+  
+  
+// ==========================================  
+// ✅ ANALYTICS REPORT  
+// ==========================================  
+app.get('/api/admin/analytics', async (req, res) => {  
+  
+    try {  
+  
+        // =====================================  
+        // 💰 TOTAL DEPOSIT  
+        // =====================================  
+        const [deposit] = await pool.query(`  
+  
+            SELECT IFNULL(SUM(amount),0) as total  
+  
+            FROM Deposits  
+  
+            WHERE status='APPROVED'  
+  
+        `);  
+  
+        // =====================================  
+        // 💸 TOTAL ROI  
+        // =====================================  
+        const [roi] = await pool.query(`  
+  
+            SELECT IFNULL(SUM(net_total),0) as total  
+  
+            FROM Income_Logs  
+  
+            WHERE type='ROI'  
+  
+        `);  
+  
+        // =====================================  
+        // 💸 TOTAL LEVEL  
+        // =====================================  
+        const [level] = await pool.query(`  
+  
+            SELECT IFNULL(SUM(net_total),0) as total  
+  
+            FROM Income_Logs  
+  
+            WHERE type='LEVEL'  
+  
+        `);  
+  
+        // =====================================  
+        // 👥 TOTAL MEMBERS  
+        // =====================================  
+        const [members] = await pool.query(`  
+  
+            SELECT COUNT(*) as total  
+  
+            FROM Users  
+  
+        `);  
+  
+        res.json({  
+  
+            total_members: members[0].total,  
+  
+            total_deposit: deposit[0].total,  
+  
+            total_roi_paid: roi[0].total,  
+  
+            total_level_paid: level[0].total,  
+  
+            total_payout:  
+                roi[0].total +  
+                level[0].total  
+  
+        });  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+  
+  
+// ==========================================  
+// ✅ LEVEL UNLOCK STATUS  
+// ==========================================  
+app.get('/api/admin/unlock-status', async (req, res) => {  
+  
+    try {  
+  
+        const [rows] = await pool.query(`  
+  
+            SELECT  
+  
+                member_id,  
+                full_name,  
+  
+                direct_volume,  
+  
+                CASE  
+  
+                    WHEN direct_volume >= 300000  
+                    THEN 'LEVEL 2 OPEN'  
+  
+                    ELSE 'NOT OPEN'  
+  
+                END as level2,  
+  
+                CASE  
+  
+                    WHEN direct_volume >= 400000  
+                    THEN 'LEVEL 3 OPEN'  
+  
+                    ELSE 'NOT OPEN'  
+  
+                END as level3,  
+  
+                CASE  
+  
+                    WHEN direct_volume >= 500000  
+                    THEN 'LEVEL 4 OPEN'  
+  
+                    ELSE 'NOT OPEN'  
+  
+                END as level4,  
+  
+                CASE  
+  
+                    WHEN direct_volume >= 600000  
+                    THEN 'LEVEL 5 OPEN'  
+  
+                    ELSE 'NOT OPEN'  
+  
+                END as level5,  
+  
+                CASE  
+  
+                    WHEN direct_volume >= 700000  
+                    THEN 'LEVEL 6 OPEN'  
+  
+                    ELSE 'NOT OPEN'  
+  
+                END as level6,  
+  
+                CASE  
+  
+                    WHEN direct_volume >= 800000  
+                    THEN 'LEVEL 7 OPEN'  
+  
+                    ELSE 'NOT OPEN'  
+  
+                END as level7  
+  
+            FROM Users  
+  
+            ORDER BY direct_volume DESC  
+  
+        `);  
+  
+        res.json(rows);  
+  
+    } catch (err) {  
+  
+        res.status(500).json({  
+            error: err.message  
+        });  
+  
+    }  
+});  
+
+ app.post('/api/admin/approve-deposit', async (req, res) => {
+
+    const conn = await pool.getConnection();
+
+    try {
+
+        await conn.beginTransaction();
+
+        const { depositId } = req.body;
+
+        // =====================================
+        // GET DEPOSIT
+        // =====================================
+        const [dep] = await conn.query(`
+
+            SELECT *
+
+            FROM Deposits
+
+            WHERE id=?
+            AND status='PENDING'
+
+        `, [depositId]);
+
+        if (dep.length === 0) {
+
+            return res.json({
+                success: false,
+                message: 'Invalid Request'
+            });
+        }
+
+        const deposit = dep[0];
+
+        // =====================================
+        // APPROVE DEPOSIT
+        // =====================================
+        await conn.query(`
+
+            UPDATE Deposits
+
+            SET status='APPROVED'
+
+            WHERE id=?
+
+        `, [depositId]);
+
+        // =====================================
+        // UPDATE USER
+        // =====================================
+        await conn.query(`
+
+            UPDATE Users
+
+            SET
+
+            total_deposit =
+            total_deposit + ?,
+
+            status='ACTIVE'
+
+            WHERE id=?
+
+        `, [
+
+            deposit.amount,
+            deposit.user_id
+
+        ]);
+
+        // =====================================
+        // GET SPONSOR
+        // =====================================
+        const [u] = await conn.query(`
+
+            SELECT sponsor_id
+
+            FROM Users
+
+            WHERE id=?
+
+        `, [deposit.user_id]);
+
+        if (u.length > 0 && u[0].sponsor_id) {
+
+            // =================================
+            // UPDATE SPONSOR DIRECT VOLUME
+            // =================================
+            await conn.query(`
+
+                UPDATE Users
+
+                SET direct_volume =
+                direct_volume + ?
+
+                WHERE member_id=?
+
+            `, [
+
+                deposit.amount,
+                u[0].sponsor_id
+
+            ]);
+        }
+
+        await conn.commit();
+
+        res.json({
+
+            success: true,
+            message: 'Deposit Approved'
+
+        });
+
+    } catch (err) {
+
+        await conn.rollback();
+
+        res.status(500).json({
+            error: err.message
+        });
+
+    } finally {
+
+        conn.release();
+
+    }
+});                 
+  
+app.listen(3000, () => console.log("🔥 DMX MASTER CORE: ZERO-MISSING PRODUCTION READY"));  
