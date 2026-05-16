@@ -1066,122 +1066,191 @@ app.get('/api/admin/members', async (req, res) => {
 });
   
   
-// ==========================================  
-// ✅ ADMIN MEMBER FULL PROFILE  
-// ==========================================  
-app.get('/api/admin/member-profile/:memberId', async (req, res) => {  
-  
-    try {  
-  
-        const [rows] = await pool.query(`  
-  
-            SELECT *  
-  
-            FROM Users  
-  
-            WHERE member_id=?  
-  
-        `, [req.params.memberId]);  
-  
-        if (rows.length === 0) {  
-  
-            return res.json({  
-                success: false  
-            });  
-        }  
-  
-        res.json({  
-  
-            success: true,  
-            profile: rows[0]  
-  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ ADMIN UPDATE MEMBER  
-// ==========================================  
-app.post('/api/admin/update-member', async (req, res) => {  
-  
-    try {  
-  
-        const {  
-  
-            member_id,  
-  
-            full_name,  
-            mobile,  
-            email,  
-  
-            password,  
-  
-            bank_name,  
-            account_number,  
-            ifsc_code,  
-            branch_name  
-  
-        } = req.body;  
-  
-        await pool.query(`  
-  
-            UPDATE Users  
-  
-            SET  
-  
-            full_name=?,  
-            mobile=?,  
-            email=?,  
-  
-            password=?,  
-  
-            bank_name=?,  
-            account_number=?,  
-            ifsc_code=?,  
-            branch_name=?  
-  
-            WHERE member_id=?  
-  
-        `, [  
-  
-            full_name,  
-            mobile,  
-            email,  
-  
-            password,  
-  
-            bank_name,  
-            account_number,  
-            ifsc_code,  
-            branch_name,  
-  
-            member_id  
-  
-        ]);  
-  
-        res.json({  
-  
-            success: true,  
-            message: "Member Updated"  
-  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            error: err.message  
-        });  
-  
-    }  
-});  
+// ==========================================
+// ✅ ADMIN MEMBER FULL PROFILE
+// ==========================================
+app.get('/api/admin/member-profile/:memberId', async (req, res) => {
+
+    try {
+
+        const [rows] = await pool.query(`
+
+            SELECT
+
+                id,
+                member_id,
+                sponsor_id,
+
+                full_name,
+                mobile,
+                email,
+
+                password,
+
+                total_deposit,
+                direct_volume,
+
+                bank_name,
+                account_number,
+                ifsc_code,
+                branch_name,
+
+                created_at
+
+            FROM Users
+
+            WHERE member_id=?
+
+        `, [req.params.memberId]);
+
+        if (rows.length === 0) {
+
+            return res.json({
+                success: false,
+                message: "Member Not Found"
+            });
+        }
+
+        // =====================================
+        // 💰 ROI + LEVEL INCOME
+        // =====================================
+        const [income] = await pool.query(`
+
+            SELECT
+
+            IFNULL(SUM(
+                CASE
+                WHEN type='ROI'
+                THEN net_total
+                ELSE 0
+                END
+            ),0) as total_roi,
+
+            IFNULL(SUM(
+                CASE
+                WHEN type='LEVEL'
+                THEN net_total
+                ELSE 0
+                END
+            ),0) as total_level
+
+            FROM Income_Logs
+
+            WHERE user_id=?
+
+        `, [rows[0].id]);
+
+        res.json({
+
+            success: true,
+
+            profile: {
+
+                ...rows[0],
+
+                total_roi: income[0].total_roi || 0,
+
+                total_level_income:
+                    income[0].total_level || 0,
+
+                total_income:
+                    (income[0].total_roi || 0) +
+                    (income[0].total_level || 0)
+
+            }
+
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ ADMIN UPDATE MEMBER
+// ==========================================
+app.post('/api/admin/update-member', async (req, res) => {
+
+    try {
+
+        const {
+
+            member_id,
+
+            full_name,
+            mobile,
+            email,
+
+            password,
+
+            bank_name,
+            account_number,
+            ifsc_code,
+            branch_name
+
+        } = req.body;
+
+        // 🔐 HASH PASSWORD
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        await pool.query(`
+
+            UPDATE Users
+
+            SET
+
+            full_name=?,
+            mobile=?,
+            email=?,
+
+            password=?,
+
+            bank_name=?,
+            account_number=?,
+            ifsc_code=?,
+            branch_name=?
+
+            WHERE member_id=?
+
+        `, [
+
+            full_name,
+            mobile,
+            email,
+
+            hashedPassword,
+
+            bank_name,
+            account_number,
+            ifsc_code,
+            branch_name,
+
+            member_id
+
+        ]);
+
+        res.json({
+
+            success: true,
+            message: "Member Updated Successfully"
+
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
   
   
 // ==========================================  
@@ -1203,6 +1272,9 @@ app.get('/api/admin/open-member/:memberId', async (req, res) => {
                 success: false  
             });  
         }  
+  
+        // 🔥 PASSWORD REMOVE
+        delete rows[0].password;
   
         res.json({  
   
@@ -1262,16 +1334,21 @@ app.get('/api/admin/transaction-report', async (req, res) => {
   
         `, [from, to]);  
   
-        res.json(rows);  
+        res.json({
+            success: true,
+            total_records: rows.length,
+            data: rows
+        });  
   
     } catch (err) {  
   
         res.status(500).json({  
+            success: false,
             error: err.message  
         });  
   
     }  
-});  
+});
   
   
 // ==========================================  
