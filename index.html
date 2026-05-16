@@ -335,703 +335,735 @@ res.json({
 
 });
   
-// ==========================================  
-// ✅ USER PROFILE  
-// ==========================================  
-app.get('/api/user/profile/:memberId', async (req, res) => {  
-  
-    try {  
-  
-        const [rows] = await pool.query(`  
-            SELECT  
-  
-                member_id,  
-                full_name,  
-                mobile,  
-                email,  
-                password,  
-  
-                bank_name,  
-                account_number,  
-                ifsc_code,  
-                branch_name,  
-  
-                sponsor_id,  
-                created_at  
-  
-            FROM Users  
-            WHERE member_id=?  
-        `, [req.params.memberId]);  
-  
-        if (rows.length === 0) {  
-            return res.json({  
-                success: false  
-            });  
-        }  
-  
-        res.json({  
-            success: true,  
-            profile: rows[0]  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            success: false,  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ UPDATE PROFILE  
-// ==========================================  
-app.post('/api/user/update-profile', async (req, res) => {  
-  
-    try {  
-  
-        const {  
-  
-            member_id,  
-            full_name,  
-            mobile,  
-            email,  
-  
-            bank_name,  
-            account_number,  
-            ifsc_code,  
-            branch_name,  
-  
-            password  
-  
-        } = req.body;  
-  
-        await pool.query(`  
-            UPDATE Users  
-  
-            SET  
-  
-            full_name=?,  
-            mobile=?,  
-            email=?,  
-  
-            bank_name=?,  
-            account_number=?,  
-            ifsc_code=?,  
-            branch_name=?,  
-  
-            password=?  
-  
-            WHERE member_id=?  
-        `, [  
-  
-            full_name,  
-            mobile,  
-            email,  
-  
-            bank_name,  
-            account_number,  
-            ifsc_code,  
-            branch_name,  
-  
-            password,  
-  
-            member_id  
-  
-        ]);  
-  
-        res.json({  
-            success: true,  
-            message: "Profile Updated"  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            success: false,  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ SPONSOR CHECK  
-// ==========================================  
-app.get('/api/check-sponsor/:sponsorId', async (req, res) => {  
-  
-    try {  
-  
-        const [rows] = await pool.query(`  
-            SELECT   
-                full_name  
-            FROM Users  
-            WHERE member_id=?  
-        `, [req.params.sponsorId]);  
-  
-        if (rows.length === 0) {  
-  
-            return res.json({  
-                success: false  
-            });  
-        }  
-  
-        res.json({  
-  
-            success: true,  
-            sponsor_name: rows[0].full_name  
-  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            success: false,  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ REGISTER MEMBER  
-// ==========================================  
-app.post('/api/register', async (req, res) => {  
-  
-    try {  
-  
-        const {  
-  
-            sponsorId,  
-  
-            name,  
-            mobile,  
-            email,  
-  
-            bank,  
-            account,  
-            ifsc,  
-            branch  
-  
-        } = req.body;  
-  
-        // 🔥 MEMBER ID  
-        const memberId = await generateMemberId();  
-  
-        // 🔥 PASSWORD  
-        const password = Math.random()
-    .toString(36)
-    .slice(-8);
+// ==========================================
+// ✅ USER PROFILE
+// ==========================================
+app.get('/api/user/profile/:memberId', async (req, res) => {
 
-const hashedPassword = await bcrypt.hash(password, 10);
-  
-        // =====================================  
-        // ✅ INSERT USER  
-        // =====================================  
-        await pool.query(`  
-            INSERT INTO Users (  
-  
-                member_id,  
-                sponsor_id,  
-  
-                full_name,  
-                mobile,  
-                email,  
-  
-                bank_name,  
-                account_number,  
-                ifsc_code,  
-                branch_name,  
-  
-                password  
-  
-            )  
-  
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)  
-        `, [  
-  
-            memberId,  
-            sponsorId,  
-  
-            name,  
-            mobile,  
-            email,  
-  
-            bank,  
-            account,  
-            ifsc,  
-            branch,  
-  
-            password  
-  
-        ]);  
-  
-        // =====================================  
-        // 📩 SEND EMAIL  
-        // =====================================  
-        await sendWelcomeEmail(  
-            email,  
-            memberId,  
-            password  
-        );  
-  
-        res.json({  
-  
-            success: true,  
-  
-            member_id: memberId,  
-            password: password  
-  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            success: false,  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ ROI INCOME HISTORY  
-// ==========================================  
-app.get('/api/user/roi-history/:memberId', async (req, res) => {  
-  
-    try {  
-  
-        const [u] = await pool.query(`  
-            SELECT id  
-            FROM Users  
-            WHERE member_id=?  
-        `, [req.params.memberId]);  
-  
-        if (u.length === 0) {  
-            return res.json([]);  
-        }  
-  
-        const userId = u[0].id;  
-  
-        const [rows] = await pool.query(`  
-            SELECT  
-  
-                DATE(created_at) as date,  
-  
-                amount,  
-                service_charge,  
-                net_total  
-  
-            FROM Income_Logs  
-  
-            WHERE user_id=?  
-            AND type='ROI'  
-  
-            ORDER BY created_at DESC  
-        `, [userId]);  
-  
-        res.json(rows);  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ LEVEL INCOME HISTORY  
-// ==========================================  
-app.get('/api/user/level-history/:memberId', async (req, res) => {  
-  
-    try {  
-  
-        const [u] = await pool.query(`  
-            SELECT id  
-            FROM Users  
-            WHERE member_id=?  
-        `, [req.params.memberId]);  
-  
-        if (u.length === 0) {  
-            return res.json([]);  
-        }  
-  
-        const userId = u[0].id;  
-  
-        const [rows] = await pool.query(`  
-            SELECT  
-  
-                DATE(created_at) as date,  
-  
-                amount,  
-                service_charge,  
-                net_total  
-  
-            FROM Income_Logs  
-  
-            WHERE user_id=?  
-            AND type='LEVEL'  
-  
-            ORDER BY created_at DESC  
-        `, [userId]);  
-  
-        res.json(rows);  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ 20 LEVEL TREE  
-// ==========================================  
-app.get('/api/user/team-tree/:memberId', async (req, res) => {  
-  
-    try {  
-  
-        const [rows] = await pool.query(`  
-  
-            WITH RECURSIVE downline AS (  
-  
-                SELECT  
-  
-                    id,  
-                    member_id,  
-                    full_name,  
-                    sponsor_id,  
-                    total_deposit,  
-                    1 as level  
-  
-                FROM Users  
-                WHERE sponsor_id=?  
-  
-                UNION ALL  
-  
-                SELECT  
-  
-                    u.id,  
-                    u.member_id,  
-                    u.full_name,  
-                    u.sponsor_id,  
-                    u.total_deposit,  
-                    d.level + 1  
-  
-                FROM Users u  
-  
-                INNER JOIN downline d  
-                ON u.sponsor_id = d.member_id  
-  
-                WHERE d.level < 20  
-            )  
-  
-            SELECT *  
-            FROM downline  
-  
-            ORDER BY level ASC  
-        `, [req.params.memberId]);  
-  
-        res.json(rows);  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ CREATE DEPOSIT REQUEST  
-// ==========================================  
-app.post('/api/user/deposit-request', async (req, res) => {  
-  
-    try {  
-  
-        const {  
-  
-            memberId,  
-            amount  
-  
-        } = req.body;  
-  
-        // 🔥 MINIMUM CHECK  
-        if (amount < 50000) {  
-  
-            return res.json({  
-                success: false,  
-                message: "Minimum Deposit 50000"  
-            });  
-        }  
-  
-        // 👤 USER  
-        const [u] = await pool.query(`  
-            SELECT id  
-            FROM Users  
-            WHERE member_id=?  
-        `, [memberId]);  
-  
-        if (u.length === 0) {  
-  
-            return res.json({  
-                success: false,  
-                message: "User Not Found"  
-            });  
-        }  
-  
-        // =====================================  
-        // ✅ INSERT REQUEST  
-        // =====================================  
-        await pool.query(`  
-            INSERT INTO Deposits (  
-  
-                user_id,  
-                amount,  
-                status  
-  
-            )  
-  
-            VALUES (?, ?, 'PENDING')  
-        `, [  
-  
-            u[0].id,  
-            amount  
-  
-        ]);  
-  
-        res.json({  
-  
-            success: true,  
-            message: "Deposit Request Submitted"  
-  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            success: false,  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ DEPOSIT HISTORY  
-// ==========================================  
-app.get('/api/user/deposit-history/:memberId', async (req, res) => {  
-  
-    try {  
-  
-        const [u] = await pool.query(`  
-            SELECT id  
-            FROM Users  
-            WHERE member_id=?  
-        `, [req.params.memberId]);  
-  
-        if (u.length === 0) {  
-            return res.json([]);  
-        }  
-  
-        const [rows] = await pool.query(`  
-            SELECT  
-  
-                amount,  
-                status,  
-                created_at  
-  
-            FROM Deposits  
-  
-            WHERE user_id=?  
-  
-            ORDER BY created_at DESC  
-        `, [u[0].id]);  
-  
-        res.json(rows);  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            error: err.message  
-        });  
-  
-    }  
-});  
-  
-  
-// ==========================================  
-// ✅ LOGIN  
-// ==========================================  
-app.post('/api/login', async (req, res) => {  
-  
-    try {  
-  
-        const {  
-  
-            member_id,  
-            password  
-  
-        } = req.body;  
-  
-        const [rows] = await pool.query(`  
-            SELECT *  
-  
-            FROM Users  
-  
-            WHERE member_id=?  
-            AND password=?  
-        `, [  
-  
-            member_id,  
-            password  
-  
-        ]);  
-  
-        if (rows.length === 0) {  
-  
-            return res.json({  
-                success: false,  
-                message: "Invalid Login"  
-            });  
-        }  
-  
-        res.json({  
-  
-            success: true,  
-            user: rows[0]  
-  
-        });  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            success: false,  
-            error: err.message  
-        });  
-  
-    }  
-});  
+    try {
+
+        const [rows] = await pool.query(`
+            SELECT
+
+                member_id,
+                full_name,
+                mobile,
+                email,
+                password,
+
+                bank_name,
+                account_number,
+                ifsc_code,
+                branch_name,
+
+                sponsor_id,
+
+                total_deposit,
+                direct_volume,
+
+                created_at
+
+            FROM Users
+
+            WHERE member_id=?
+        `, [req.params.memberId]);
+
+        if (rows.length === 0) {
+
+            return res.json({
+                success: false,
+                message: "User Not Found"
+            });
+        }
+
+        res.json({
+
+            success: true,
+
+            profile: rows[0]
+
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+
+            success: false,
+            error: err.message
+
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ UPDATE PROFILE
+// ==========================================
+app.post('/api/user/update-profile', async (req, res) => {
+
+    try {
+
+        const {
+
+            member_id,
+
+            full_name,
+            mobile,
+            email,
+
+            bank_name,
+            account_number,
+            ifsc_code,
+            branch_name,
+
+            password
+
+        } = req.body;
+
+        // =====================================
+        // ✅ UPDATE USER
+        // =====================================
+        await pool.query(`
+
+            UPDATE Users
+
+            SET
+
+                full_name=?,
+                mobile=?,
+                email=?,
+
+                bank_name=?,
+                account_number=?,
+                ifsc_code=?,
+                branch_name=?,
+
+                password=?
+
+            WHERE member_id=?
+
+        `, [
+
+            full_name,
+            mobile,
+            email,
+
+            bank_name,
+            account_number,
+            ifsc_code,
+            branch_name,
+
+            password,
+
+            member_id
+
+        ]);
+
+        res.json({
+
+            success: true,
+            message: "Profile Updated Successfully"
+
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+
+            success: false,
+            error: err.message
+
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ REGISTER MEMBER
+// ==========================================
+app.post('/api/register', async (req, res) => {
+
+    try {
+
+        const {
+
+            sponsorId,
+
+            name,
+            mobile,
+            email,
+
+            bank,
+            account,
+            ifsc,
+            branch
+
+        } = req.body;
+
+        // 🔥 MEMBER ID
+        const memberId = await generateMemberId();
+
+        // 🔥 PASSWORD
+        const password = Math.random()
+            .toString(36)
+            .slice(-8);
+
+        // 🔐 HASH PASSWORD
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // =====================================
+        // ✅ INSERT USER
+        // =====================================
+        await pool.query(`
+            INSERT INTO Users (
+
+                member_id,
+                sponsor_id,
+
+                full_name,
+                mobile,
+                email,
+
+                bank_name,
+                account_number,
+                ifsc_code,
+                branch_name,
+
+                password
+
+            )
+
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+
+            memberId,
+            sponsorId,
+
+            name,
+            mobile,
+            email,
+
+            bank,
+            account,
+            ifsc,
+            branch,
+
+            hashedPassword
+
+        ]);
+
+        // =====================================
+        // 📩 SEND EMAIL
+        // =====================================
+        await sendWelcomeEmail(
+            email,
+            memberId,
+            password
+        );
+
+        res.json({
+
+            success: true,
+
+            member_id: memberId,
+            password: password
+
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ LOGIN
+// ==========================================
+app.post('/api/login', async (req, res) => {
+
+    try {
+
+        const {
+
+            member_id,
+            password
+
+        } = req.body;
+
+        // 🔍 FIND USER
+        const [rows] = await pool.query(`
+            SELECT *
+            FROM Users
+            WHERE member_id=?
+        `, [member_id]);
+
+        if (rows.length === 0) {
+
+            return res.json({
+                success: false,
+                message: "Invalid Login"
+            });
+        }
+
+        const user = rows[0];
+
+        // 🔐 PASSWORD CHECK
+        const match = await bcrypt.compare(
+            password,
+            user.password
+        );
+
+        if (!match) {
+
+            return res.json({
+                success: false,
+                message: "Invalid Login"
+            });
+        }
+
+        res.json({
+
+            success: true,
+            user
+
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
+
+// ==========================================
+// ✅ ROI INCOME HISTORY
+// ==========================================
+app.get('/api/user/roi-history/:memberId', async (req, res) => {
+
+    try {
+
+        const [u] = await pool.query(`
+            SELECT id
+            FROM Users
+            WHERE member_id=?
+        `, [req.params.memberId]);
+
+        if (u.length === 0) {
+            return res.json([]);
+        }
+
+        const userId = u[0].id;
+
+        const [rows] = await pool.query(`
+            SELECT
+
+                DATE(created_at) as date,
+
+                amount,
+                service_charge,
+                net_total
+
+            FROM Income_Logs
+
+            WHERE user_id=?
+            AND type='ROI'
+
+            ORDER BY created_at DESC
+        `, [userId]);
+
+        res.json({
+            success: true,
+            roi_history: rows
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ LEVEL INCOME HISTORY
+// ==========================================
+app.get('/api/user/level-history/:memberId', async (req, res) => {
+
+    try {
+
+        const [u] = await pool.query(`
+            SELECT id
+            FROM Users
+            WHERE member_id=?
+        `, [req.params.memberId]);
+
+        if (u.length === 0) {
+            return res.json([]);
+        }
+
+        const userId = u[0].id;
+
+        const [rows] = await pool.query(`
+            SELECT
+
+                DATE(created_at) as date,
+
+                amount,
+                service_charge,
+                net_total
+
+            FROM Income_Logs
+
+            WHERE user_id=?
+            AND type='LEVEL'
+
+            ORDER BY created_at DESC
+        `, [userId]);
+
+        res.json({
+            success: true,
+            level_history: rows
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ 20 LEVEL TREE
+// ==========================================
+app.get('/api/user/team-tree/:memberId', async (req, res) => {
+
+    try {
+
+        const [rows] = await pool.query(`
+
+            WITH RECURSIVE downline AS (
+
+                SELECT
+
+                    id,
+                    member_id,
+                    full_name,
+                    sponsor_id,
+                    total_deposit,
+                    1 as level
+
+                FROM Users
+                WHERE sponsor_id=?
+
+                UNION ALL
+
+                SELECT
+
+                    u.id,
+                    u.member_id,
+                    u.full_name,
+                    u.sponsor_id,
+                    u.total_deposit,
+                    d.level + 1
+
+                FROM Users u
+
+                INNER JOIN downline d
+                ON u.sponsor_id = d.member_id
+
+                WHERE d.level < 20
+            )
+
+            SELECT *
+            FROM downline
+
+            ORDER BY level ASC
+        `, [req.params.memberId]);
+
+        res.json({
+            success: true,
+            team: rows
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ CREATE DEPOSIT REQUEST
+// ==========================================
+app.post('/api/user/deposit-request', async (req, res) => {
+
+    try {
+
+        const {
+
+            memberId,
+            amount
+
+        } = req.body;
+
+        // 🔥 MINIMUM CHECK
+        if (amount < 50000) {
+
+            return res.json({
+                success: false,
+                message: "Minimum Deposit 50000"
+            });
+        }
+
+        // 👤 USER
+        const [u] = await pool.query(`
+            SELECT id
+            FROM Users
+            WHERE member_id=?
+        `, [memberId]);
+
+        if (u.length === 0) {
+
+            return res.json({
+                success: false,
+                message: "User Not Found"
+            });
+        }
+
+        // =====================================
+        // ✅ INSERT REQUEST
+        // =====================================
+        await pool.query(`
+            INSERT INTO Deposits (
+
+                user_id,
+                amount,
+                status
+
+            )
+
+            VALUES (?, ?, 'PENDING')
+        `, [
+
+            u[0].id,
+            amount
+
+        ]);
+
+        res.json({
+
+            success: true,
+            message: "Deposit Request Submitted"
+
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
+
+
+// ==========================================
+// ✅ DEPOSIT HISTORY
+// ==========================================
+app.get('/api/user/deposit-history/:memberId', async (req, res) => {
+
+    try {
+
+        const [u] = await pool.query(`
+            SELECT id
+            FROM Users
+            WHERE member_id=?
+        `, [req.params.memberId]);
+
+        if (u.length === 0) {
+            return res.json([]);
+        }
+
+        const [rows] = await pool.query(`
+            SELECT
+
+                amount,
+                status,
+                created_at
+
+            FROM Deposits
+
+            WHERE user_id=?
+
+            ORDER BY created_at DESC
+        `, [u[0].id]);
+
+        res.json({
+            success: true,
+            deposit_history: rows
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
   
 // ==========================================  
 // 🔥 ADMIN PANEL APIs (SINGAPORE CLUB)  
 // ==========================================  
   
-  
-// ==========================================  
-// ✅ ADMIN MEMBER LIST  
-// ==========================================  
-app.get('/api/admin/members', async (req, res) => {  
-  
-    try {  
-  
-        const search = req.query.search || '';  
-  
-        const [rows] = await pool.query(`  
-  
-            SELECT  
-  
-                u.id,  
-  
-                u.member_id,  
-                u.full_name,  
-  
-                u.sponsor_id,  
-  
-                u.mobile,  
-                u.email,  
-  
-                u.password,  
-  
-                u.total_deposit,  
-  
-                u.direct_volume,  
-  
-                u.bank_name,  
-                u.account_number,  
-                u.ifsc_code,  
-                u.branch_name,  
-  
-                IFNULL((  
-                    SELECT SUM(net_total)  
-                    FROM Income_Logs  
-                    WHERE user_id = u.id  
-                    AND type='ROI'  
-                ),0) as total_roi,  
-  
-                IFNULL((  
-                    SELECT SUM(total_deposit)  
-                    FROM Users  
-                    WHERE sponsor_id = u.member_id  
-                ),0) as team_business  
-  
-            FROM Users u  
-  
-            WHERE  
-  
-            u.member_id LIKE ?  
-            OR u.full_name LIKE ?  
-  
-            ORDER BY u.id DESC  
-  
-        `, [  
-  
-            `%${search}%`,  
-            `%${search}%`  
-  
-        ]);  
-  
-        // 🔥 COUNTING  
-        const result = rows.map((r, index) => ({  
-  
-            no: index + 1,  
-  
-            member_name: r.full_name,  
-  
-            member_id: r.member_id,  
-  
-            sponsor_id: r.sponsor_id,  
-  
-            mobile: r.mobile,  
-  
-            email: r.email,  
-  
-            password: r.password,  
-  
-            total_deposit: r.total_deposit,  
-  
-            total_roi: r.total_roi,  
-  
-            team_business: r.team_business,  
-  
-            direct_business: r.direct_volume  
-  
-        }));  
-  
-        res.json(result);  
-  
-    } catch (err) {  
-  
-        res.status(500).json({  
-            error: err.message  
-        });  
-  
-    }  
-});  
+// ==========================================
+// ✅ ADMIN MEMBER LIST
+// ==========================================
+app.get('/api/admin/members', async (req, res) => {
+
+    try {
+
+        const search = req.query.search || '';
+
+        const [rows] = await pool.query(`
+
+            SELECT
+
+                u.id,
+
+                u.member_id,
+                u.full_name,
+
+                u.sponsor_id,
+
+                u.mobile,
+                u.email,
+
+                u.password,
+
+                u.total_deposit,
+
+                u.direct_volume,
+
+                u.bank_name,
+                u.account_number,
+                u.ifsc_code,
+                u.branch_name,
+
+                IFNULL((
+                    SELECT SUM(net_total)
+                    FROM Income_Logs
+                    WHERE user_id = u.id
+                    AND type='ROI'
+                ),0) as total_roi,
+
+                IFNULL((
+                    SELECT SUM(net_total)
+                    FROM Income_Logs
+                    WHERE user_id = u.id
+                    AND type='LEVEL'
+                ),0) as total_level_income,
+
+                IFNULL((
+                    SELECT SUM(total_deposit)
+                    FROM Users
+                    WHERE sponsor_id = u.member_id
+                ),0) as team_business
+
+            FROM Users u
+
+            WHERE
+
+            u.member_id LIKE ?
+            OR u.full_name LIKE ?
+
+            ORDER BY u.id DESC
+
+        `, [
+
+            `%${search}%`,
+            `%${search}%`
+
+        ]);
+
+        // 🔥 COUNTING
+        const result = rows.map((r, index) => ({
+
+            no: index + 1,
+
+            member_name: r.full_name,
+
+            member_id: r.member_id,
+
+            sponsor_id: r.sponsor_id,
+
+            mobile: r.mobile,
+
+            email: r.email,
+
+            password: r.password,
+
+            total_deposit: r.total_deposit || 0,
+
+            total_roi: r.total_roi || 0,
+
+            total_level_income: r.total_level_income || 0,
+
+            total_income:
+                (r.total_roi || 0) +
+                (r.total_level_income || 0),
+
+            team_business: r.team_business || 0,
+
+            direct_business: r.direct_volume || 0,
+
+            bank_name: r.bank_name,
+
+            account_number: r.account_number,
+
+            ifsc_code: r.ifsc_code,
+
+            branch_name: r.branch_name
+
+        }));
+
+        res.json({
+            success: true,
+            members: result
+        });
+
+    } catch (err) {
+
+        res.status(500).json({
+            success: false,
+            error: err.message
+        });
+
+    }
+});
   
   
 // ==========================================  
